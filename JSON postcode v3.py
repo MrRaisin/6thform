@@ -1,123 +1,178 @@
 import json
 import http.client
 import urllib.request
-#import requests
+import argparse
+import platform
+import sys
+import time
 
-def postcode(postcode):
-    #userinput='tw10 6hw'# input(str("Please enter your postcode of your current location"))
-    urlData = 'http://api.postcodes.io/postcodes/'+postcode  #'+?callback=foo'
-    #urlData = "http://api.openweathermap.org/data/2.5/weather?q=Boras,SE"
+import usb.core
+import usb.util
+
+FEED_PAST_CUTTER = b'\n' * 5
+USB_BUSY = 66
+
+PIPSTA_USB_VENDOR_ID = 0x0483
+PIPSTA_USB_PRODUCT_ID = 0xA053
+
+
+def printmain(txtprt):
+    """The main loop of the application.  Wrapping the code in a function
+    prevents it being executed when various tools import the code.
+    """
+    if platform.system() != 'Linux':
+        sys.exit('This script has only been written for Linux')
+
+    # Find the Pipsta's specific Vendor ID and Product ID
+    dev = usb.core.find(idVendor=PIPSTA_USB_VENDOR_ID,
+                        idProduct=PIPSTA_USB_PRODUCT_ID)
+    if dev is None:  # if no such device is connected...
+        raise IOError('Printer  not found')  # ...report error
 
     try:
-        uh = urllib.request.urlopen(urlData)
-        #print('web status:',uh.status)
-        data = uh.read()
-        #print ('Retrieved',len(data),'characters')
-        #print(data)
-        js = json.loads(data.decode("utf-8"))
-        #print(js)
-        print('Postcode',postcode.upper(),' has')
-        #print('longitude:',js['result']['longitude'])
-        #print('latitude:',js['result']['latitude'])
-        Long_and_Lat(str(js['result']['longitude']),str(js['result']['latitude']))
+        # Linux requires USB devices to be reset before configuring, may not be
+        # required on other operating systems.
+        dev.reset()
+
+        # Initialisation. Passing no arguments sets the configuration to the
+        # currently active configuration.
+        dev.set_configuration()
+    except usb.core.USBError as ex:
+        raise IOError('Failed to configure the printer', ex)
+
+    # The following steps get an 'Endpoint instance'. It uses
+    # PyUSB's versatile find_descriptor functionality to claim
+    # the interface and get a handle to the endpoint
+    # An introduction to this (forming the basis of the code below)
+    # can be found at:
+
+    cfg = dev.get_active_configuration()  # Get a handle to the active interface
+
+    interface_number = cfg[(0, 0)].bInterfaceNumber
+    # added to silence Linux complaint about unclaimed interface, it should be
+    # release automatically
+    usb.util.claim_interface(dev, interface_number)
+    alternate_setting = usb.control.get_interface(dev, interface_number)
+    interface = usb.util.find_descriptor(
+        cfg, bInterfaceNumber=interface_number,
+        bAlternateSetting=alternate_setting)
+
+    usb_endpoint = usb.util.find_descriptor(
+        interface,
+        custom_match=lambda e:
+        usb.util.endpoint_direction(e.bEndpointAddress) ==
+        usb.util.ENDPOINT_OUT
+    )
+
+    if usb_endpoint is None:  # check we have a real endpoint handle
+        raise IOError("Could not find an endpoint to print to")
+
+    # Now that the USB endpoint is open, we can start to send data to the
+    # printer.
+    # The following opens the text_file, by using the 'with' statemnent there is
+    # no need to close the text_file manually.  This method ensures that the
+    # close is called in all situation (including unhandled exceptions).
+    
+    txt = txtprt#"hello from the pipsta printer" #parse_arguments()
+    usb_endpoint.write(b'\x1b!\x00')
+
+    # Print a char at a time and check the printers buffer isn't full
+    for x in txt:
+        usb_endpoint.write(x)    # write all the data to the USB OUT endpoint
         
-    except  urllib.request.HTTPError:
-            print('Could not find postcode '+userinput+' \ncheck it is a valid postcode')
+        res = dev.ctrl_transfer(0xC0, 0x0E, 0x020E, 0, 2)
+        while res[0] == USB_BUSY:
+            time.sleep(0.01)
+            res = dev.ctrl_transfer(0xC0, 0x0E, 0x020E, 0, 2)
+            
+    usb_endpoint.write(FEED_PAST_CUTTER)
+    usb.util.dispose_resources(dev)
+    
+def postcode(postcode):
+    urlData = ''
+    pcode = ''
+    if len(postcode) ==0:
+        urlData = 'http://api.postcodes.io/random/postcodes/'
+    else:
+        urlData = 'http://api.postcodes.io/postcodes/'+postcode
+    
+    try:
+        urlrequest = urllib.request.urlopen(urlData)
+        data = urlrequest.read()
+        print('data:\n',data)
+        js = json.loads(data.decode("utf-8"))
+        print('js is type of',type(js))
+        if len(postcode) ==0:
+            pcode = str(js['result']['postcode'])
+        else:
+            pcode = postcode
+        
+        print('Postcode',pcode.upper(),' has')
+        Long_and_Lat(str(js['result']['longitude']),str(js['result']['latitude']),pcode)
+        print('is in the country of:',str(js['result']['country']))
+        
+    except urllib.request.HTTPError as httpE:
+        print(httpE.code)
+        print('#'*30+'\nERROR')
+        print('Could not find postcode '+postcode.upper()+' \ncheck it is a valid postcode\n')
+    
 
-def Long_and_Lat(Lg, Lt):
-    #Long=Lg#'51.4386470'#input('Please enter the longitude: ')
-    #Lat=Lt#'-0.3189160'#input('Please enter the latitude: ')
-
+def Long_and_Lat(Lg, Lt,pcode=''):
     Long=Lg
     Lat=Lt
     urlData = 'http://api.sunrise-sunset.org/json?lat='+Lat+'&lng='+Long
 
     try:
-        uh = urllib.request.urlopen(urlData)
-        #print('web status:',uh.status)
-        data = uh.read()
-        #print ('Retrieved',len(data),'characters')
-        #print(data)
+        urlrequest = urllib.request.urlopen(urlData)
+        data = urlrequest.read()
         js = json.loads(data.decode("utf-8"))
-        #print(js)
+        msg= '#'*30+'\n'
+        if len(pcode) > 0:
+            msg += 'Postcode: '+ pcode.upper() +'\n'
+        msg += 'Longitude:'+ Long + '\nand latitude:' + Lat +'\n'
+        msg += 'Has sunrise:'+js['results']['sunrise']+' \nand sunset:'+js['results']['sunset'] +'\n'
+        msg += '\n'*5
+        msg += '#'*30
+
+        print('Postcode:',pcode,'\n')
         print('Longitude:', Long,'and latitude', Lat)
         print('Has sunrise:',js['results']['sunrise'],' and sunset:',js['results']['sunset'])
+        printmain(msg)
+        
     except  urllib.request.HTTPError:
             print('Could not find sunrise & sunset times for longitude'+Long+' and latitude'+Lat)
     
 
+def menu():
+    print('*'*29)
+    print('*'*10+' Welcome '+'*'*10)
+    print('*'*29)
 
-print('*'*29)
-print('*'*10+' Welcome '+'*'*10)
-print('*'*29)
+    print('You can enter a postcode or longitude & latitude')
+    print('and the program will return the sunrise & sunset \ntimes for that location')
+    print('')
+    print('The program uses a web service to \'calculate\' the \nlongitude & latitude from a postcode')
+    print('Once the longitude & latitude are know \nit uses another webservice to find the sunrise & sunsets time')
+    print()
+    print('Make your choice below')
+    print('Postcodes enter P')
+    print('Longitude & Latitude enter L')
+    print('random postcode R')
 
-print('You can enter a postcode or longitude & latitude')
-print('and the program will return the sunrise & sunset \ntimes for that location')
-print('')
-print('The program uses a web service to \'calculate\' the \nlongitude & latitude from a postcode')
-print('Once the longitude & latitude are know \nit uses another webservice to find the sunrise & sunsets time')
-print()
-print('Make your choice below')
-print('Postcodes enter P')
-print('Longitude & Latitude enter L')
+while True:
+    menu()
+    choice = input('\nPlease enter your choice L or P or R: ')
+    if choice.upper() == 'R':
+        pcode= ''
+        print('checking web service.....')
+        postcode(pcode)
+    elif choice.upper() == 'P':
+        pcode= input(str("Please enter your postcode: "))
+        print('checking web service.....')
+        postcode(pcode)
+    elif choice.upper() == 'L':
+        lg =input('Please enter the longitude: ')
+        lt =input('Please enter the latitude: ')
+        Long_and_Lat(lg,lt)
 
-choice = input('\nPlease enter your choice L or P: ')
-if choice.upper() == 'P':
-    pcode='tw10 6hw'# input(str("Please enter your postcode of your current location"))    
-    postcode(pcode)
-elif choice.upper() == 'L':
-    #lg ='-0.288201665927763'# input('Please enter the longitude: ')
-    #lt ='51.4587556098985'#input('Please enter the latitude: ')
-    lg =input('Please enter the longitude: ')
-    lt =input('Please enter the latitude: ')
-    Long_and_Lat(lg,lt)
-
-
-
-##userinput='tw10 6hw'# input(str("Please enter your postcode of your current location"))
-##urlData = 'http://api.postcodes.io/postcodes/'+userinput  #'+?callback=foo'
-###urlData = "http://api.openweathermap.org/data/2.5/weather?q=Boras,SE"
-##
-##try:
-##    uh = urllib.request.urlopen(urlData)
-##    #print('web status:',uh.status)
-##    data = uh.read()
-##    #print ('Retrieved',len(data),'characters')
-##    #print(data)
-##    js = json.loads(data.decode("utf-8"))
-##    #print(js)
-##    print('longitude:',js['result']['longitude'])
-##    print('latitude:',js['result']['latitude'])
-##except  urllib.request.HTTPError:
-##        print('Could not find postcode '+userinput+' \ncheck it is a valid postcode')
-
-
-
-
-##webURL = urllib.request.urlopen(urlData)
-##data = webURL.read()
-##encoding = webURL.info().get_content_charset('utf-8')
-##print(json.loads(data.decode(encoding)))
-#{'coord': {'lat': 57.72, 'lon': 12.94}, 'visibility': 10000, 'name': 'Boras', 'main': {'pressure': 1021, 'humidity': 71, 'temp_min': 285.15, 'temp': 286.39, 'temp_max': 288.15}, 'id': 2720501, 'weather': [{'id': 802, 'description': 'scattered clouds', 'icon': '03d', 'main': 'Clouds'}], 'wind': {'speed': 5.1, 'deg': 260}, 'sys': {'type': 1, 'country': 'SE', 'sunrise': 1443243685, 'id': 5384, 'message': 0.0132, 'sunset': 1443286590}, 'dt': 1443257400, 'cod': 200, 'base': 'stations', 'clouds': {'all': 40}}
-
-
-
-
-##
-##conn = http.client.HTTPConnection('api.postcodes.io',80)
-##conn.request("GET", url)
-##r1 = conn.getresponse()
-##if r1.status == 200:
-##    print (r1.status, r1.reason)
-##    data1 = r1.read()
-##    json.loads(data.decode(encoding))
-##    #my_dict = json.loads(str(data1))
-##    
-##    print(data1)
-##    print('longitude:',my_dict['longitude'])
-##    #json.loads(str(data1))
-##    #print(json.dumps("result"))
-##
-##print('connection closed')
-##conn.close()
 
